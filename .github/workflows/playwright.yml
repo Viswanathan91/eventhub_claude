@@ -1,0 +1,80 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Playwright E2E Tests
+#
+# PURPOSE:
+#   Runs the full Playwright test suite against the live hosted app at
+#   https://eventhub.rahulshettyacademy.com on every push to main.
+#   The HTML report is uploaded as a downloadable GitHub Actions artifact.
+#
+# NO SECRETS REQUIRED:
+#   Tests run against the publicly hosted app — no local server, no DB, no SSH.
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: Playwright E2E Tests
+
+on:
+  push:
+    branches: [main]
+
+  # Allow manual runs from the GitHub Actions UI
+  workflow_dispatch:
+
+concurrency:
+  group: playwright-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '21.7.1'
+
+jobs:
+  playwright:
+    name: Run Playwright Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Node.js setup ─────────────────────────────────────────────────────────
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      # ── Install root dependencies (Playwright lives at root level) ────────────
+      - name: Install dependencies
+        run: npm ci
+
+      # ── Install Playwright browsers (Chromium only, per playwright.config.ts) ─
+      - name: Install Playwright Chromium browser
+        run: npx playwright install chromium --with-deps
+
+      # ── Run all Playwright tests ──────────────────────────────────────────────
+      # `--reporter=html` emits the HTML report to playwright-report/
+      # The job continues even on test failure so the artifact is always uploaded
+      - name: Run Playwright tests
+        run: npx playwright test --reporter=html
+        continue-on-error: true
+        id: playwright-run
+
+      # ── Upload HTML report as artifact ────────────────────────────────────────
+      # Retention: 30 days (GitHub default). Download from the Actions run page.
+      - name: Upload Playwright HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+
+      # ── Fail the job if tests failed ──────────────────────────────────────────
+      # We used continue-on-error above to guarantee the artifact upload runs.
+      # This step re-fails the job so the overall check is red on test failure.
+      - name: Check test results
+        if: steps.playwright-run.outcome == 'failure'
+        run: |
+          echo "::error::Playwright tests failed. Download the HTML report artifact for details."
+          exit 1

@@ -1,146 +1,206 @@
+// tests/booking-flow.spec.js
+// E2E tests: TC-007 (single ticket), TC-008 (3 tickets), TC-011 (cancel from detail)
+
 import { test, expect } from '@playwright/test';
 
-const BASE_URL      = 'http://localhost:3000';
-
-// ── Credentials ────────────────────────────────────────────────────────────────
-const USER_EMAIL    = 'rahulshetty1@gmail.com';
+const USER_EMAIL = 'rahulshetty1@gmail.com';
 const USER_PASSWORD = 'Magiclife1!';
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
 async function login(page) {
-  await page.goto(`${BASE_URL}/login`);
-
-  // Located by placeholder
+  await page.goto('/login');
   await page.getByPlaceholder('you@email.com').fill(USER_EMAIL);
-
-  // Located by label
-  await page.getByLabel('Password').fill(USER_PASSWORD);
-
-  // Located by id
+  await page.getByLabel('Password').fill(USER_PASSWORD); // FIX: Priority 3 label over Priority 4 ID
   await page.locator('#login-btn').click();
-
-  await expect(page.getByRole('link', { name: 'Browse Events →' })).toBeVisible();
+  // logout-btn appears in the navbar only when user is authenticated.
+  // Hosted server can be slow on cold start — allow 15s.
+  await expect(page.getByTestId('logout-btn')).toBeVisible({ timeout: 15000 });
 }
 
-/** Returns a datetime-local string (YYYY-MM-DDTHH:mm) 1 year from now */
-function futureDateValue() {
-  const d   = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T10:00`;
+async function clearBookings(page) {
+  await page.goto('/bookings');
+  await page.waitForLoadState('networkidle');
+  const bookingCards = page.getByTestId('booking-card');
+  const count = await bookingCards.count();
+  if (count > 0) {
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.getByRole('button', { name: 'Clear all bookings' }).click();
+    await expect(page.getByText('No bookings yet')).toBeVisible({ timeout: 5000 });
+  }
 }
 
-
-// ── Test ───────────────────────────────────────────────────────────────────────
-test('create event via UI, book it, and verify seat reduction', async ({ page }) => {
-
-  // ── Step 1: Log in ───────────────────────────────────────────────────────
-  await login(page);
-
-  // ── Step 2: Create a new event via the admin form ────────────────────────
-  await page.goto(`${BASE_URL}/admin/events`);
-
-  // Unique title so we can find this exact card later
-  const eventTitle = `Test Event ${Date.now()}`;
-
-  // Located by id (explicit on the component)
-  await page.locator('#event-title-input').fill(eventTitle);
-
-  // Description — only textarea in the form
-  await page.locator('#admin-event-form textarea').fill('Playwright test event');
-
-  // Located by label (Select auto-generates id from label text)
-  await page.getByLabel('City').fill('Test City');
-  await page.getByLabel('Venue').fill('Test Venue');
-
-  // datetime-local input — located by label
-  await page.getByLabel('Event Date & Time').fill(futureDateValue());
-
-  await page.getByLabel('Price ($)').fill('100');
-  await page.getByLabel('Total Seats').fill('50');
-
-  // Located by id
-  await page.locator('#add-event-btn').click();
-
-  // Wait for success toast
-  await expect(page.getByText('Event created!')).toBeVisible();
-
-  console.log(`Created event: "${eventTitle}"`);
-
-  // ── Step 3: Go to Events page and find the newly created card ─────────────
-  await page.goto(`${BASE_URL}/events`);
-
-  // Located by data-testid
-  const eventCards = page.getByTestId('event-card');
-  await expect(eventCards.first()).toBeVisible();
-
-  // Scan all visible event cards for the one matching our created title
-  const targetCard = eventCards.filter({ hasText: eventTitle }).first();
-  await expect(targetCard).toBeVisible({ timeout: 5000 });
-
-  // Capture seat count before booking
-  const seatsBeforeBooking = parseInt(await targetCard.getByText('seat').first().innerText());
-  console.log(`Seats before booking: ${seatsBeforeBooking}`);
-
-  // Located by data-testid inside the matched card
-  await targetCard.getByTestId('book-now-btn').click();
-
-  // ── Step 4: Fill the booking form ────────────────────────────────────────
-
-  // Quantity defaults to 1 — verify via id
-  const ticketCount = page.locator('#ticket-count');
-  await expect(ticketCount).toHaveText('1');
-
-  // Located by label
-  await page.getByLabel('Full Name').fill('Test Student');
-
-  // Located by id
-  await page.locator('#customer-email').fill('test.student@example.com');
-
-  // Located by placeholder
+// Books the first available event and returns the booking reference string.
+// Used by tests that need an existing booking as setup (e.g. TC-011 cancel flow).
+async function bookFirstEvent(page, { name = 'Test User', email = 'test@example.com' } = {}) {
+  await page.goto('/events');
+  await page.getByTestId('event-card').first().getByTestId('book-now-btn').click();
+  await expect(page).toHaveURL(/\/events\/\d+/);
+  await page.getByLabel('Full Name').fill(name);
+  await page.getByTestId('customer-email').fill(email); // FIX: data-testid over #id
   await page.getByPlaceholder('+91 98765 43210').fill('9876543210');
-
-  // Located by CSS class
   await page.locator('.confirm-booking-btn').click();
+  await expect(page.getByText('Booking Confirmed!')).toBeVisible(); // FIX: guard assertion
+  await expect(page.locator('.booking-ref')).toBeVisible();
+  const bookingRef = (await page.locator('.booking-ref').textContent()).trim();
+  console.log(`Booked event. Ref: ${bookingRef}`);
+  return bookingRef;
+}
 
-  // ── Step 5: Verify booking confirmation ──────────────────────────────────
+// ── Test Suite ────────────────────────────────────────────────────────────────
 
-  // Located by CSS class
-  const bookingRefEl = page.locator('.booking-ref').first();
-  await expect(bookingRefEl).toBeVisible();
+test.describe('Booking Flow', () => {
+  test.afterEach(async ({ page }) => {
+    await clearBookings(page);
+  });
 
-  const bookingRef = (await bookingRefEl.innerText()).trim();
-  expect(bookingRef.charAt(0)).toBe(eventTitle.trim().charAt(0).toUpperCase());
+  // TC-007 ─────────────────────────────────────────────────────────────────────
+  test('TC-007: book a single ticket — full flow with booking ref format validation', async ({ page }) => {
+    // -- Step 1: Login --
+    await login(page);
 
-  console.log(`Booking confirmed. Ref: ${bookingRef}`);
+    // -- Step 2: Navigate to events and capture first event title --
+    await page.goto('/events');
+    const firstCard = page.getByTestId('event-card').first();
+    const eventTitle = (await firstCard.locator('h3').textContent()).trim();
+    console.log(`Booking event: "${eventTitle}"`);
 
-  // ── Step 6: Verify booking appears in My Bookings ────────────────────────
-  await page.getByRole('link', { name: 'View My Bookings' }).click();
-  await expect(page).toHaveURL(`${BASE_URL}/bookings`);
+    // -- Step 3: Open event detail page --
+    await firstCard.getByTestId('book-now-btn').click();
+    await expect(page).toHaveURL(/\/events\/\d+/);
 
-  // Located by id
-  const bookingCards = page.locator('#booking-card');
-  await expect(bookingCards.first()).toBeVisible();
+    // -- Step 4: Default quantity is 1 --
+    await expect(page.locator('#ticket-count')).toHaveText('1');
 
-  // Find the card that contains our booking ref (via CSS class inside the card)
-  const matchingCard = bookingCards.filter({ has: page.locator('.booking-ref', { hasText: bookingRef }) });
-  await expect(matchingCard).toBeVisible();
+    // -- Step 5: Capture price per ticket from booking panel --
+    // TODO: request data-testid="price-per-ticket" from dev — CSS classes are fragile
+    const priceText = (await page.locator('span.text-2xl.font-bold.text-indigo-700').textContent()).trim();
+    const pricePerTicket = parseFloat(priceText.replace(/[$,]/g, ''));
+    console.log(`Price per ticket: ${priceText}`);
 
-  // Verify event title also appears in the same card
-  await expect(matchingCard).toContainText(eventTitle);
+    // -- Step 6: Fill booking form --
+    await page.getByLabel('Full Name').fill('Test User');
+    await page.getByTestId('customer-email').fill('testuser@example.com'); // FIX: data-testid over #id
+    await page.getByPlaceholder('+91 98765 43210').fill('9876543210');
 
-  console.log(`Booking card found in My Bookings for ref: ${bookingRef}`);
+    // -- Step 7: Submit booking --
+    await page.locator('.confirm-booking-btn').click();
 
-  // ── Step 7: Verify seat count reduced on Events page ─────────────────────
-  await page.goto(`${BASE_URL}/events`);
-  await expect(eventCards.first()).toBeVisible();
+    // -- Step 8: Booking confirmation card is shown --
+    await expect(page.getByText('Booking Confirmed!')).toBeVisible();
+    await expect(page.locator('.booking-ref')).toBeVisible();
+    const bookingRef = (await page.locator('.booking-ref').textContent()).trim();
+    console.log(`Booking ref: ${bookingRef}`);
 
-  // Find the same event by title
-  const updatedCard       = eventCards.filter({ hasText: eventTitle }).first();
-  await expect(updatedCard).toBeVisible();
+    // -- Step 9: Booking ref format must be {CHAR}-{6_ALPHANUMERIC} --
+    expect(bookingRef).toMatch(/^[A-Z0-9]-[A-Z0-9]{6}$/);
 
-  const seatsAfterBooking = parseInt(await updatedCard.getByText('seat').first().innerText());
-  console.log(`Seats after booking: ${seatsAfterBooking}`);
+    // -- Step 10: Ref first character matches event title first character --
+    expect(bookingRef[0]).toBe(eventTitle[0].toUpperCase());
 
-  // Booked 1 ticket — count must drop by exactly 1
-  expect(seatsAfterBooking).toBe(seatsBeforeBooking - 1);
+    // -- Step 11: Confirmation card shows Tickets = 1 (single ticket) --
+    // FIX: added for consistency with TC-008's qty=3 assertion
+    // TODO: request data-testid="confirmation-row-tickets" from dev to avoid CSS chain
+    const ticketsRow = page.locator('span.text-gray-500', { hasText: 'Tickets' }).locator('..');
+    await expect(ticketsRow.locator('span.font-medium')).toHaveText('1');
+
+    // -- Step 12: Total in confirmation = price × 1 (single ticket) --
+    // TODO: request data-testid="confirmation-row-total" from dev to avoid CSS chain
+    const totalRow = page.locator('span.text-gray-500', { hasText: 'Total' }).locator('..');
+    const totalText = (await totalRow.locator('span.font-medium').textContent()).trim();
+    const actualTotal = parseFloat(totalText.replace(/[$,]/g, ''));
+    expect(actualTotal).toBe(pricePerTicket);
+
+    // -- Step 13: "View My Bookings" link is present on confirmation --
+    await expect(page.getByRole('link', { name: 'View My Bookings' })).toBeVisible();
+  });
+
+  // TC-008 ─────────────────────────────────────────────────────────────────────
+  test('TC-008: book 3 tickets — quantity and total price validated on confirmation', async ({ page }) => {
+    // -- Step 1: Login --
+    await login(page);
+
+    // -- Step 2: Open first event detail page --
+    await page.goto('/events');
+    await page.getByTestId('event-card').first().getByTestId('book-now-btn').click();
+    await expect(page).toHaveURL(/\/events\/\d+/);
+
+    // -- Step 3: Increase quantity to 3 using + button --
+    // FIX: getByRole (Priority 2) over locator('button', { hasText }) combo
+    const incrementBtn = page.getByRole('button', { name: '+' });
+    await incrementBtn.click(); // 1 → 2
+    await incrementBtn.click(); // 2 → 3
+    await expect(page.locator('#ticket-count')).toHaveText('3');
+
+    // -- Step 4: Capture expected total from the price summary box --
+    // The total value is in span.text-indigo-700 inside the summary box.
+    // TODO: request data-testid="price-summary" from dev to avoid CSS class selector
+    const priceSummaryBox = page.locator('.bg-indigo-50.rounded-xl').first();
+    const expectedTotal = (await priceSummaryBox.locator('span.text-indigo-700').textContent()).trim();
+    console.log(`Expected total (price × 3): ${expectedTotal}`);
+
+    // -- Step 5: Fill booking form --
+    await page.getByLabel('Full Name').fill('Multi Ticket User');
+    await page.getByTestId('customer-email').fill('multi@example.com'); // FIX: data-testid over #id
+    await page.getByPlaceholder('+91 98765 43210').fill('9876543210');
+
+    // -- Step 6: Submit booking --
+    await page.locator('.confirm-booking-btn').click();
+
+    // -- Step 7: Booking confirmation card is shown --
+    await expect(page.getByText('Booking Confirmed!')).toBeVisible();
+    await expect(page.locator('.booking-ref')).toBeVisible();
+    const bookingRef = (await page.locator('.booking-ref').textContent()).trim();
+    console.log(`3-ticket booking ref: ${bookingRef}`);
+
+    // -- Step 8: Confirmation card shows Tickets = 3 --
+    // TODO: request data-testid="confirmation-row-tickets" from dev to avoid CSS chain
+    const ticketsRow = page.locator('span.text-gray-500', { hasText: 'Tickets' }).locator('..');
+    await expect(ticketsRow.locator('span.font-medium')).toHaveText('3');
+
+    // -- Step 9: Confirmation card Total = expected total (price × 3) --
+    // TODO: request data-testid="confirmation-row-total" from dev to avoid CSS chain
+    const totalRow = page.locator('span.text-gray-500', { hasText: 'Total' }).locator('..');
+    await expect(totalRow.locator('span.font-medium')).toHaveText(expectedTotal);
+  });
+
+  // TC-011 ─────────────────────────────────────────────────────────────────────
+  test('TC-011: cancel a booking from detail page — toast shown and booking removed from list', async ({ page }) => {
+    // -- Step 1: Login and create a booking to cancel --
+    // FIX: setup extracted to bookFirstEvent() helper — removes duplication from TC-011
+    await login(page);
+    const bookingRef = await bookFirstEvent(page, {
+      name: 'Cancel Test User',
+      email: 'cancel@example.com',
+    });
+    console.log(`Created booking to cancel: ${bookingRef}`);
+
+    // -- Step 2: Navigate to My Bookings via confirmation link --
+    await page.getByRole('link', { name: 'View My Bookings' }).click();
+    await expect(page).toHaveURL(/\/bookings$/);
+
+    // -- Step 3: Find the booking card and navigate to its detail page --
+    const bookingCard = page.getByTestId('booking-card').filter({ hasText: bookingRef });
+    await expect(bookingCard).toBeVisible();
+    await bookingCard.getByRole('link', { name: 'View Details' }).click();
+    await expect(page).toHaveURL(/\/bookings\/\d+/);
+
+    // -- Step 4: Click Cancel Booking on the detail page --
+    await page.getByRole('button', { name: 'Cancel Booking' }).click();
+
+    // -- Step 5: ConfirmDialog opens — click "Yes, cancel it" --
+    await expect(page.getByTestId('confirm-dialog-yes')).toBeVisible();
+    await page.getByTestId('confirm-dialog-yes').click();
+
+    // -- Step 6: Success toast is shown --
+    await expect(page.getByText('Booking cancelled successfully')).toBeVisible();
+
+    // -- Step 7: Automatically redirected back to /bookings --
+    await expect(page).toHaveURL(/\/bookings$/);
+
+    // -- Step 8: Cancelled booking no longer appears in the list --
+    await expect(
+      page.getByTestId('booking-card').filter({ hasText: bookingRef })
+    ).not.toBeVisible();
+  });
 });
