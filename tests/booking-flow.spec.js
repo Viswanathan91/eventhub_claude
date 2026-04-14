@@ -6,6 +6,7 @@ import { test, expect } from '@playwright/test';
 const USER_EMAIL = 'rahulshetty1@gmail.com';
 const USER_PASSWORD = 'Magiclife1!';
 
+//New comment
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function login(page) {
